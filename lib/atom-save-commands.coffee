@@ -6,7 +6,7 @@ spawn = require 'cross-spawn-async'
 _ = require 'underscore'
 fs = require 'fs'
 async = require 'async'
-$ = jQuery = require 'jquery'
+{allowUnsafeEval} = require 'loophole'
 
 AtomSaveCommandsView = require './atom-save-commands-view'
 {CompositeDisposable,Directory,File} = require 'atom'
@@ -72,6 +72,7 @@ module.exports = AtomSaveCommands =
 			relativePath = atom.project.relativize(eventPath)
 			apo = path.parse eventPath
 			rpo = path.parse relativePath
+			# model holds all of the replacement values
 			model = {}
 			model.absPath = apo.dir + path.sep
 			model.relPath = rpo.dir
@@ -87,11 +88,16 @@ module.exports = AtomSaveCommands =
 			model.filename = rpo.base
 			model.relFullPath = model.relPath + model.filename
 			model.sep = path.sep
-			for key,value of model
-				fkey = '{' + key + '}'
-				command = S(command).replaceAll(fkey,value).s
+			if ( typeof( command ) == "function" )
+				command = command(model);
+			else
+				# iterate through the model pairs and do the replacement
+				for key,value of model
+					fkey = '{' + key + '}'
+					command = S(command).replaceAll(fkey,value).s
 			command
 
+	# executes the processed command
 	executeCommand: (command, callback) ->
 		# console.log "COMMAND #{command}"
 		@cmdDiv = document.createElement('div')
@@ -173,10 +179,12 @@ module.exports = AtomSaveCommands =
 		@subscriptions.add atom.workspace.observeTextEditors (editor)=>
 			# console.log "Registered onSave event with '#{editor.getPath()}'"
 			@subscriptions.add editor.onDidSave (event)=>
-				try
-					@executeOn(event.path,'save-commands.json')
-				catch error
-					console.log error
+				for configFile in ['save-commands.json', 'save-commands.js']
+					try
+						@executeOn(event.path,configFile)
+						return
+					catch error
+						console.log error
 
 		@panel = atom.workspace.addBottomPanel(
 			item: document.createElement('div')
@@ -216,7 +224,12 @@ module.exports = AtomSaveCommands =
 			@tap {}, (m) -> m[k] = v for k, v of x for x in xs
 
 	loadConfig: (editorPath, filename,callback)->
+		# does this remove filename from editorPath, or does it
+		# remove the directory saved into from the path?
 		dir = new File(editorPath).getParent()
+
+		# look for a config file; move through parent directories until
+		# we find one or we reach the project root
 		while (true)
 			confFile = dir.getPath() + path.sep + filename
 			file = new File(confFile)
@@ -233,34 +246,67 @@ module.exports = AtomSaveCommands =
 		# @config.timeout 	= timeout ? 4000
 		# @config.commands	= commands ? []
 
-		splitOnce = (text,sep)->
-			components = text.split(sep)
-			return [components.shift(), components.join(sep)]
+		if ( confFile.search( /\.js$/ ) != -1 )
+			# read the JS config file into @config
+			fs.readFile confFile, (err, data)=>
+				if data
+					tempConfig = allowUnsafeEval -> eval data.toString()
+					@config = @merge @config, tempConfig
 
-		fs.readFile confFile, (err,data)=>
-			if data
-				try
-					parsed = JSON.parse(data)
-				catch e
-					alert("Your config file is not a valid JSON")
-					return
-				@config = @merge @config, parsed
+				@config.cwd = dir.getPath()
 
-			@config.cwd = dir.getPath()
+				# convert the commands from config file into glob/command objects
+				modCommands = []
+				for gc in @config.commands
+					modCommands.push @splitConfigCommand gc
 
-			splitOnce = (str,sep)->
-				components = str.split(sep)
-				[components.shift(), components.join(sep)]
+				@config.commands = modCommands
+				callback @config
 
-			modCommands = []
-			for gc in @config.commands
-				kv = splitOnce(gc,':')
-				modCommands.push
-					glob: kv[0].trim()
-					command: kv[1].trim()
+		else if ( confFile.search( /\.json$/ ) != -1 )
+			# read the JSON config file into @config
+			fs.readFile confFile, (err,data)=>
+				if data
+					try
+						parsed = JSON.parse(data)
+					catch e
+						alert("Your config file is not a valid JSON")
+						return
+					@config = @merge @config, parsed
 
-			@config.commands = modCommands
-			callback @config
+				@config.cwd = dir.getPath()
+
+				# convert the commands from config file into glob/command objects
+				modCommands = []
+				for gc in @config.commands
+					modCommands.push @splitConfigCommand gc
+
+				@config.commands = modCommands
+				callback @config
+
+	# split str on sep
+	# return array of the first split plus all of the rest rejoined
+	splitOnce: (str,sep) ->
+		components = str.split(sep)
+		[components.shift(), components.join(sep)]
+
+	# should return a { glob: ..., command: } object
+	splitConfigCommand: (configCommand) ->
+		if ( typeof( configCommand ) == "string" )
+			kv = @splitOnce( configCommand,':' )
+		else if ( _.isArray( configCommand ) )
+			kv = configCommand
+
+		# this has a bad smell
+		if ( _.isArray( kv ))
+			if ( typeof( kv[1] ) == "function" )
+				return { glob: kv[0].trim(), command: kv[1] }
+			else
+				return { glob: kv[0].trim(), command: kv[1].trim() }
+		else
+			# is an object?
+			return kv
+
 
 	deactivate: ->
 		@panel.destroy()
@@ -314,6 +360,9 @@ module.exports = AtomSaveCommands =
 			if stats.isFile()
 				callback [absPath]
 
+	# return an array of all of the commands whose globs match 'file'
+	# the returned array will have the commands after being processed/replaced
+	# and are ready for execution
 	getCommandsFor: (file)->
 		# console.log "Commands for #{file}:"
 		commands = []

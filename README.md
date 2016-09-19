@@ -10,7 +10,11 @@ The command(s) and their output will be displayed in a panel at the bottom of th
 
 Create save-commands.json file in your project's root folder
 Create one entry for each command you wish to run, and assign it to a glob like this:  
-glob : command {parameter}
+`"glob : command {parameter}"`  
+or like this:  
+`[ "glob", "command {parameter}" ]`  
+See the optional Javascript configuration file information below for how to 
+use a callback to generate the command to be run.
 
 Here is an example of save-commands.json file
 ```
@@ -33,6 +37,28 @@ You can create multiple save-commands.json files in various folders. The package
 be used as current working directory for commands
 
 If you get errors when saving a file, double check your save-commands.json file to make sure it is formatted properly. As of version 0.6.7, the package will warn you if config file is malformed.
+
+If you store your commands in a Javascript file named `save-commands.js` (instead of using the normal JSON format), you can specify a callback to
+generate the command on each save.  Here is an example of a `save-commands.js` (note the `modules.exports =` part is important!)
+```
+module.exports = {
+  "commands": [
+    "php_tests/unit_tests/*_tests.php        : php {relFullPath}",
+    "php_tests/integration_tests/*_tests.php : php {relFullPath}",
+    [ "php_classes/**/*.php", function (model) {
+                                // turn "php_classes/Search/Class.php" into
+                                // "php_tests/unit_tests/Search_Class_tests.php"
+                                let file = model.relFullPath;
+                                file = file.replace( 'php_classes/', '' )
+                                           .replace( model.ext, '' )
+                                           .split( '/' )
+                                           .join( '_' );
+                                file = "php_tests/unit_tests/" + file + "_tests.php";
+                                return "php " + file;
+                              } ]
+  ]
+}
+```
 
 ### Available parameters:  
 - absPath: absolute path of the saved file (without file name)  
